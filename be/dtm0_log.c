@@ -303,6 +303,17 @@ M0_INTERNAL int m0_be_dtm0_log_prune(struct m0_be_dtm0_log    *log,
 	return rc;
 }
 
+M0_INTERNAL void m0_be_dtm0_log_clear(struct m0_be_dtm0_log *log)
+{
+	struct m0_dtm0_log_rec *rec;
+
+	m0_tl_teardown(lrec, log->dl_tlist, rec) {
+		M0_ASSERT(m0_dtm0_log_rec__invariant(rec));
+		m0_be_dtm0_log_rec_fini(&rec, NULL);
+	}
+	M0_POST(lrec_tlist_is_empty(log->dl_tlist));
+}
+
 #undef M0_TRACE_SUBSYSTEM
 
 /** @} end of dtm group */

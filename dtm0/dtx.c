@@ -36,6 +36,28 @@
 #include "dtm0/service.h" /* m0_dtm0_service */
 #include "reqh/reqh.h" /* reqh2confc */
 #include "conf/helpers.h" /* proc2srv */
+#include "be/dtm0_log.h" /* dtm0_log API */
+
+/* XXX: Under construction */
+#if 0
+struct dtx_pa {
+	/* Linkage for the list of PAs */
+	struct m0_tlink     dp_link;
+	uint64_t            dp_magic;
+	/* Remote service FID (user) */
+	struct m0_fid       dp_rsvc;
+	/* User-provide context for the PA */
+	void               *dp_rctx;
+	/* Remote service FID (dtm) */
+	struct m0_fid       dp_rdtms;
+	/* Position in the txr */
+	uint64_t            dp_index;
+};
+
+M0_TL_DESCR_DEFINE(dpa, "dtm0_dtx_pa", static, struct dtx_pa, dp_link, dp_magic,
+		   0xDEAD1DEA, 0x11EAD0F1DEA);
+M0_TL_DEFINE(dpa, static, struct dtx_pa);
+#endif
 
 static struct m0_sm_state_descr dtx_states[] = {
 	[M0_DDS_INIT] = {
@@ -98,6 +120,25 @@ M0_INTERNAL void m0_dtm0_dtx_domain_fini(void)
 		m0_sm_conf_fini(&dtx_sm_conf);
 }
 
+/* Adds/Updates the log entry associated with the provided dtx.
+ * @param buf An optional user datum to be used in REDO messages. When
+ *            NULL is provided, only the tx descriptor is updated.
+ */
+static void dtx_log_update(struct m0_dtm0_dtx *dtx, struct m0_buf *buf)
+{
+	struct m0_be_dtm0_log *log;
+	struct m0_buf          empty_buf = {};
+
+	M0_PRE(dtx->dd_dtms != NULL);
+	log = dtx->dd_dtms->dos_log;
+	M0_PRE(log != NULL);
+
+	m0_mutex_lock(&log->dl_lock);
+	m0_be_dtm0_log_update(log, NULL, &dtx->dd_txd,
+			      buf != NULL ? buf : &empty_buf);
+	m0_mutex_unlock(&log->dl_lock);
+}
+
 static struct m0_dtm0_dtx *m0_dtm0_dtx_alloc(struct m0_dtm0_service *svc,
 					     struct m0_sm_group     *group)
 {
@@ -145,9 +186,25 @@ static int m0_dtm0_dtx_open(struct m0_dtm0_dtx  *dtx,
 	return m0_dtm0_tx_desc_init(&dtx->dd_txd, nr);
 }
 
-static int m0_dtm0_dtx_assign(struct m0_dtm0_dtx  *dtx,
-			      uint32_t             pa_idx,
-			      const struct m0_fid *pa_fid)
+static void m0_dtm0_dtx_assign_fop(struct m0_dtm0_dtx  *dtx,
+				   uint32_t             pa_idx,
+				   const struct m0_fop *pa_fop)
+{
+	M0_PRE(dtx != NULL);
+	M0_PRE(pa_idx < dtx->dd_txd.dtd_pg.dtpg_nr);
+
+	(void) pa_idx;
+
+	/* See the comment at m0_dtm0_dtx::dd_op */
+	if (dtx->dd_fop == NULL) {
+		dtx->dd_fop = pa_fop;
+	}
+}
+
+
+static int m0_dtm0_dtx_assign_fid(struct m0_dtm0_dtx  *dtx,
+				  uint32_t             pa_idx,
+				  const struct m0_fid *pa_fid)
 {
 	struct m0_dtm0_tx_pa   *pa;
 	struct m0_reqh         *reqh;
@@ -202,13 +259,28 @@ static int m0_dtm0_dtx_assign(struct m0_dtm0_dtx  *dtx,
 
 static int m0_dtm0_dtx_close(struct m0_dtm0_dtx *dtx)
 {
+	struct m0_buf          buf;
+	char                  *data = "It is not a FOP.";
+
 	M0_PRE(dtx != NULL);
 	M0_PRE(m0_sm_group_is_locked(dtx->dd_sm.sm_grp));
 
+	/* TODO: As the string states it is not a FOP, it is just
+	 * a hard-coded string. We should use xcode here to encode
+	 * the FOP (dtx->dd_fop). See ::fol_record_pack and ::m0_fop_encdec
+	 * for the details.
+	 * At this moment we do not do REDO, so that it is safe to put
+	 * anything into the log.
+	 */
+	m0_buf_init(&buf, data, strlen(data) + 1);
+
+	dtx_log_update(dtx, &buf);
+
+	/* Once a dtx is closed, the FOP (or FOPs) has to be serialized
+	 * into the log, so that we should no longer hold any references to it.
+	 */
+	dtx->dd_fop = NULL;
 	m0_sm_state_set(&dtx->dd_sm, M0_DDS_INPROGRESS);
-
-	/* TODO: add a log entry */
-
 	return 0;
 }
 
@@ -259,7 +331,7 @@ static void dtx_exec_all_ast_cb(struct m0_sm_group *grp, struct m0_sm_ast *ast)
 
 static void m0_dtm0_dtx_executed(struct m0_dtm0_dtx *dtx, uint32_t idx)
 {
-	struct m0_dtm0_tx_pa *pa;
+	struct m0_dtm0_tx_pa  *pa;
 
 	M0_PRE(dtx != NULL);
 	M0_PRE(m0_sm_group_is_locked(dtx->dd_sm.sm_grp));
@@ -295,7 +367,7 @@ static void m0_dtm0_dtx_executed(struct m0_dtm0_dtx *dtx, uint32_t idx)
 		m0_sm_ast_post(dtx->dd_sm.sm_grp, &dtx->dd_exec_all_ast);
 	}
 
-	/* TODO: update the log entry */
+	dtx_log_update(dtx, NULL);
 }
 
 M0_INTERNAL struct m0_dtx* m0_dtx0_alloc(struct m0_dtm0_service *svc,
@@ -328,13 +400,22 @@ M0_INTERNAL int m0_dtx0_open(struct m0_dtx  *dtx, uint32_t nr)
 	return m0_dtm0_dtx_open(dtx->tx_dtx, nr);
 }
 
-M0_INTERNAL int m0_dtx0_assign(struct m0_dtx       *dtx,
-			       uint32_t             pa_idx,
-			       const struct m0_fid *pa_fid)
+M0_INTERNAL int m0_dtx0_assign_fid(struct m0_dtx       *dtx,
+				   uint32_t             pa_idx,
+				   const struct m0_fid *pa_fid)
 {
 	M0_PRE(dtx != NULL);
-	return m0_dtm0_dtx_assign(dtx->tx_dtx, pa_idx, pa_fid);
+	return m0_dtm0_dtx_assign_fid(dtx->tx_dtx, pa_idx, pa_fid);
 }
+
+M0_INTERNAL void m0_dtx0_assign_fop(struct m0_dtx       *dtx,
+				    uint32_t             pa_idx,
+				    const struct m0_fop *pa_fop)
+{
+	M0_PRE(dtx != NULL);
+	m0_dtm0_dtx_assign_fop(dtx->tx_dtx, pa_idx, pa_fop);
+}
+
 
 M0_INTERNAL int m0_dtx0_close(struct m0_dtx *dtx)
 {

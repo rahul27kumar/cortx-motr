@@ -859,7 +859,7 @@ static void st_one_dtm0_op(void)
 	srv_srv = m0_reqh_service_lookup(srv_reqh, &srv_dtm0_fid);
 	rc = m0_dtm0_service_process_connect(srv_srv, &cli_srv_fid, cl_ep_addr);
 	M0_UT_ASSERT(rc == 0);
-	ut_m0c->m0c_dtms = m0_dtm0_service_find(srv_reqh);
+	ut_m0c->m0c_dtms = m0_dtm0_service_find(&ut_m0c->m0c_reqh);
 	M0_UT_ASSERT(ut_m0c->m0c_dtms != NULL);
 
 	st_put_one();
