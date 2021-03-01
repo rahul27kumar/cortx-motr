@@ -70,7 +70,7 @@ struct m0_dtm0_dtx {
 	 * from the REDO mechanism standpoint). So that we do not use
 	 * any lists here. But we will have to some time later.
 	 */
-	const struct m0_fop          *dd_fop;
+	const struct m0_fop    *dd_fop;
 };
 
 M0_INTERNAL void m0_dtm0_dtx_domain_init(void);

@@ -120,40 +120,53 @@ M0_INTERNAL void m0_dtm0_dtx_domain_fini(void)
 		m0_sm_conf_fini(&dtx_sm_conf);
 }
 
-/* Adds/Updates the log entry associated with the provided dtx.
- * @param buf An optional user datum to be used in REDO messages. When
- *            NULL is provided, only the tx descriptor is updated.
- */
-static void dtx_log_update(struct m0_dtm0_dtx *dtx, struct m0_buf *buf)
+static void dtx_log_insert(struct m0_dtm0_dtx *dtx)
+{
+	struct m0_be_dtm0_log  *log;
+	struct m0_dtm0_log_rec *record = M0_AMB(record, dtx, dlr_dtx);
+	int                     rc;
+
+	M0_PRE(m0_dtm0_tx_desc_state_eq(&dtx->dd_txd, M0_DTPS_INPROGRESS));
+	M0_PRE(dtx->dd_dtms != NULL);
+	log = dtx->dd_dtms->dos_log;
+	M0_PRE(log != NULL);
+
+	m0_mutex_lock(&log->dl_lock);
+	rc = m0_be_dtm0_log_insert_volatile(log, record);
+	m0_mutex_unlock(&log->dl_lock);
+	M0_ASSERT(rc == 0);
+}
+
+static void dtx_log_update(struct m0_dtm0_dtx *dtx)
 {
 	struct m0_be_dtm0_log *log;
-	struct m0_buf          empty_buf = {};
+	struct m0_dtm0_log_rec *record = M0_AMB(record, dtx, dlr_dtx);
 
 	M0_PRE(dtx->dd_dtms != NULL);
 	log = dtx->dd_dtms->dos_log;
 	M0_PRE(log != NULL);
 
 	m0_mutex_lock(&log->dl_lock);
-	m0_be_dtm0_log_update(log, NULL, &dtx->dd_txd,
-			      buf != NULL ? buf : &empty_buf);
+	m0_be_dtm0_log_update_volatile(log, record);
 	m0_mutex_unlock(&log->dl_lock);
 }
 
 static struct m0_dtm0_dtx *m0_dtm0_dtx_alloc(struct m0_dtm0_service *svc,
 					     struct m0_sm_group     *group)
 {
-	struct m0_dtm0_dtx *dtx;
+	struct m0_dtm0_log_rec *rec;
 
 	M0_PRE(svc != NULL);
 	M0_PRE(group != NULL);
 
-	M0_ALLOC_PTR(dtx);
-	if (dtx != NULL) {
-		dtx->dd_dtms = svc;
-		dtx->dd_ancient_dtx.tx_dtx = dtx;
-		m0_sm_init(&dtx->dd_sm, &dtx_sm_conf, M0_DDS_INIT, group);
+	M0_ALLOC_PTR(rec);
+	if (rec != NULL) {
+		rec->dlr_dtx.dd_dtms = svc;
+		rec->dlr_dtx.dd_ancient_dtx.tx_dtx = &rec->dlr_dtx;
+		m0_sm_init(&rec->dlr_dtx.dd_sm, &dtx_sm_conf, M0_DDS_INIT,
+			   group);
 	}
-	return dtx;
+	return &rec->dlr_dtx;
 }
 
 static void m0_dtm0_dtx_free(struct m0_dtm0_dtx *dtx)
@@ -166,7 +179,7 @@ static void m0_dtm0_dtx_free(struct m0_dtm0_dtx *dtx)
 
 static int m0_dtm0_dtx_prepare(struct m0_dtm0_dtx *dtx)
 {
-	int               rc;
+	int rc;
 
 	M0_PRE(dtx != NULL);
 	rc = m0_dtm0_clk_src_now(&dtx->dd_dtms->dos_clk_src,
@@ -259,22 +272,16 @@ static int m0_dtm0_dtx_assign_fid(struct m0_dtm0_dtx  *dtx,
 
 static int m0_dtm0_dtx_close(struct m0_dtm0_dtx *dtx)
 {
-	struct m0_buf          buf;
-	char                  *data = "It is not a FOP.";
-
 	M0_PRE(dtx != NULL);
 	M0_PRE(m0_sm_group_is_locked(dtx->dd_sm.sm_grp));
 
-	/* TODO: As the string states it is not a FOP, it is just
-	 * a hard-coded string. We should use xcode here to encode
-	 * the FOP (dtx->dd_fop). See ::fol_record_pack and ::m0_fop_encdec
-	 * for the details.
-	 * At this moment we do not do REDO, so that it is safe to put
-	 * anything into the log.
+	/* TODO: We may want to capture the fop contents here.
+	 * See ::fol_record_pack and ::m0_fop_encdec for the details.
+	 * At this moment we do not do REDO, so that it is safe to
+	 * avoid any actions on the fop here.
 	 */
-	m0_buf_init(&buf, data, strlen(data) + 1);
 
-	dtx_log_update(dtx, &buf);
+	dtx_log_insert(dtx);
 
 	/* Once a dtx is closed, the FOP (or FOPs) has to be serialized
 	 * into the log, so that we should no longer hold any references to it.
@@ -282,14 +289,6 @@ static int m0_dtm0_dtx_close(struct m0_dtm0_dtx *dtx)
 	dtx->dd_fop = NULL;
 	m0_sm_state_set(&dtx->dd_sm, M0_DDS_INPROGRESS);
 	return 0;
-}
-
-/* TODO: move into tx_desc module */
-static bool m0_dtm0_tx_desc_state(const struct m0_dtm0_tx_desc *txd,
-				  enum m0_dtm0_tx_pa_state state)
-{
-	return m0_forall(i, txd->dtd_pg.dtpg_nr,
-			 txd->dtd_pg.dtpg_pa[i].pa_state == state);
 }
 
 static void m0_dtm0_dtx_persistent(struct m0_dtm0_dtx *dtx, uint32_t idx)
@@ -305,8 +304,6 @@ static void m0_dtm0_dtx_persistent(struct m0_dtm0_dtx *dtx, uint32_t idx)
 	M0_ASSERT(pa->pa_state >= M0_DTPS_INPROGRESS &&
 		  pa->pa_state <= M0_DTPS_PERSISTENT);
 	pa->pa_state = M0_DTPS_PERSISTENT;
-
-	/* TODO: remove the log entry */
 }
 
 static void dtx_exec_all_ast_cb(struct m0_sm_group *grp, struct m0_sm_ast *ast)
@@ -324,7 +321,7 @@ static void dtx_exec_all_ast_cb(struct m0_sm_group *grp, struct m0_sm_ast *ast)
 		m0_dtm0_dtx_persistent(dtx, i);
 	}
 
-	if (m0_dtm0_tx_desc_state(&dtx->dd_txd, M0_DTPS_PERSISTENT)) {
+	if (m0_dtm0_tx_desc_state_eq(&dtx->dd_txd, M0_DTPS_PERSISTENT)) {
 		m0_sm_state_set(&dtx->dd_sm, M0_DDS_STABLE);
 	}
 }
@@ -351,6 +348,9 @@ static void m0_dtm0_dtx_executed(struct m0_dtm0_dtx *dtx, uint32_t idx)
 
 	if (dtx->dd_nr_executed == dtx->dd_txd.dtd_pg.dtpg_nr) {
 		M0_ASSERT(dtx->dd_sm.sm_state == M0_DDS_EXECUTED);
+		M0_ASSERT_INFO(dtds_forall(&dtx->dd_txd, >= M0_DTPS_EXECUTED),
+			       "Non-executed PAs should not exist "
+			       "at this point.");
 		m0_sm_state_set(&dtx->dd_sm, M0_DDS_EXECUTED_ALL);
 
 		dtx->dd_exec_all_ast.sa_cb = dtx_exec_all_ast_cb;
@@ -367,7 +367,7 @@ static void m0_dtm0_dtx_executed(struct m0_dtm0_dtx *dtx, uint32_t idx)
 		m0_sm_ast_post(dtx->dd_sm.sm_grp, &dtx->dd_exec_all_ast);
 	}
 
-	dtx_log_update(dtx, NULL);
+	dtx_log_update(dtx);
 }
 
 M0_INTERNAL struct m0_dtx* m0_dtx0_alloc(struct m0_dtm0_service *svc,
