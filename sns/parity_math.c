@@ -67,11 +67,28 @@ static void xor_recover(struct m0_parity_math *math,
                         struct m0_buf *fails,
 			enum m0_parity_linsys_algo algo);
 
+#ifndef __KERNEL__
+static void isal_recover(struct m0_parity_math *math,
+			 struct m0_buf *data,
+			 struct m0_buf *parity,
+			 struct m0_buf *fails,
+			 enum m0_parity_linsys_algo algo);
+
+/*
+ * Inverts the encoding matrix and generates tables of recovery coefficient
+ * codes for lost data.
+ */
+static int isal_gen_recov_coeff_tbl(uint32_t data_count, uint32_t parity_count,
+				    struct m0_buf *failed_idx_buf,
+				    struct m0_buf *alive_idx_buf,
+				    uint8_t *encode_matrix, uint8_t *g_tbls);
+#else
 static void reed_solomon_recover(struct m0_parity_math *math,
                                  struct m0_buf *data,
                                  struct m0_buf *parity,
                                  struct m0_buf *fails,
 				 enum m0_parity_linsys_algo algo);
+#endif /* __KERNEL__ */
 
 static void fail_idx_xor_recover(struct m0_parity_math *math,
 				 struct m0_buf *data,
@@ -191,7 +208,11 @@ static void (*recover[M0_PARITY_CAL_ALGO_NR])(struct m0_parity_math *math,
 					      struct m0_buf *fails,
 					      enum m0_parity_linsys_algo algo) = {
 	[M0_PARITY_CAL_ALGO_XOR] = xor_recover,
+#ifndef __KERNEL__
+	[M0_PARITY_CAL_ALGO_ISA] = isal_recover,
+#else
 	[M0_PARITY_CAL_ALGO_REED_SOLOMON] = reed_solomon_recover,
+#endif /* __KERNEL__ */
 };
 
 static void (*fidx_recover[M0_PARITY_CAL_ALGO_NR])(struct m0_parity_math *math,
@@ -676,6 +697,7 @@ static uint32_t fails_count(uint8_t *fail, uint32_t unit_count)
 	return count;
 }
 
+#ifdef __KERNEL__
 /* Fills 'mat' and 'vec' with data passed to recovery algorithm. */
 static void recovery_vec_fill(struct m0_parity_math *math,
 			       uint8_t *fail, uint32_t unit_count, /* in. */
@@ -699,6 +721,7 @@ static void recovery_vec_fill(struct m0_parity_math *math,
 		}
 	}
 }
+#endif /* __KERNEL__ */
 
 /* Fills 'mat' with data passed to recovery algorithm. */
 static void recovery_mat_fill(struct m0_parity_math *math,
@@ -720,6 +743,7 @@ static void recovery_mat_fill(struct m0_parity_math *math,
 	}
 }
 
+#ifdef __KERNEL__
 /* Updates internal structures of 'math' with recovered data. */
 static void parity_math_recover(struct m0_parity_math *math,
 				uint8_t *fail, uint32_t unit_count,
@@ -744,6 +768,7 @@ static void parity_math_recover(struct m0_parity_math *math,
 		}
 	}
 }
+#endif /* __KERNEL__ */
 
 M0_INTERNAL int m0_parity_recov_mat_gen(struct m0_parity_math *math,
 					uint8_t *fail)
@@ -809,6 +834,248 @@ static void xor_recover(struct m0_parity_math *math,
         }
 }
 
+#ifndef __KERNEL__
+static int isal_gen_recov_coeff_tbl(uint32_t data_count, uint32_t parity_count,
+				    struct m0_buf *failed_idx_buf,
+				    struct m0_buf *alive_idx_buf,
+				    uint8_t *encode_mat, uint8_t *g_tbls)
+{
+	uint8_t *decode_mat = NULL;
+	uint8_t *temp_mat = NULL;
+	uint8_t *invert_mat = NULL;
+	uint8_t *failed_ids = NULL;
+	uint8_t *alive_ids = NULL;
+	uint32_t unit_count;
+	uint32_t i;
+	uint32_t j;
+	uint32_t r;
+	uint8_t	 s;
+	int	 ret = 0;
+
+	M0_ENTRY();
+
+	failed_ids = (uint8_t *)failed_idx_buf->b_addr;
+	alive_ids = (uint8_t *)alive_idx_buf->b_addr;
+
+	unit_count = data_count + parity_count;
+
+	M0_ALLOC_ARR(decode_mat, (unit_count * data_count));
+	if (decode_mat == NULL) {
+		ret = M0_ERR_INFO(-ENOMEM, "failed to allocate memory for "
+				  "decode matrix");
+		goto fini;
+	}
+
+	M0_ALLOC_ARR(temp_mat, (unit_count * data_count));
+	if (temp_mat == NULL) {
+		ret = M0_ERR_INFO(-ENOMEM, "failed to allocate memory for "
+				  "temp matrix");
+		goto fini;
+	}
+
+	M0_ALLOC_ARR(invert_mat, (unit_count * data_count));
+	if (invert_mat == NULL) {
+		ret = M0_ERR_INFO(-ENOMEM, "failed to allocate memory for "
+				  "invert matrix");
+		goto fini;
+	}
+
+	/* Construct temp_mat (matrix that encoded remaining frags)
+	 * by removing erased rows
+	 */
+	for (i = 0; i < data_count; i++) {
+		r = alive_ids[i];
+		for (j = 0; j < data_count; j++)
+			temp_mat[data_count * i + j] =
+				encode_mat[data_count * r + j];
+	}
+
+	/* Invert matrix to get recovery matrix */
+	ret = gf_invert_matrix(temp_mat, invert_mat, data_count);
+	if (ret != 0)
+		ret = M0_ERR_INFO(ret, "failed to construct an %u x %u inverse "
+				  "of the input matrix", data_count, data_count);
+		goto fini;
+	}
+
+	/* Create decode matrix */
+	for (r = 0; r < failed_idx_buf->b_nob; r++) {
+		/* Get decode matrix with only wanted recovery rows */
+		if (failed_ids[r] < data_count) {    /* A src err */
+			for (i = 0; i < data_count; i++)
+				decode_mat[data_count * r + i] =
+					invert_mat[data_count * failed_ids[r] + i];
+		}
+		/* For non-src (parity) erasures need to multiply
+		 * encode matrix * invert
+		 */
+		else { /* A parity err */
+			for (i = 0; i < data_count; i++) {
+				s = 0;
+				for (j = 0; j < data_count; j++)
+					s ^= gf_mul(invert_mat[j * data_count + i],
+						    encode_mat[data_count * failed_ids[r] + j]);
+				decode_mat[data_count * r + i] = s;
+			}
+		}
+	}
+
+	ec_init_tables(data_count, (uint32_t)failed_idx_buf->b_nob, decode_mat, g_tbls);
+
+fini:
+	m0_free(temp_mat);
+	m0_free(invert_mat);
+	m0_free(decode_mat);
+
+	M0_LEAVE();
+
+	return ret;
+}
+
+static void isal_recover(struct m0_parity_math *math,
+			 struct m0_buf *data,
+			 struct m0_buf *parity,
+			 struct m0_buf *fails,
+			 enum m0_parity_linsys_algo algo)
+{
+	struct m0_buf failed_idx_buf;
+	struct m0_buf alive_idx_buf;
+	uint32_t      fail_count;
+	uint32_t      unit_count;
+	uint32_t      data_count;
+	uint32_t      parity_count;
+	uint32_t      block_size = data[0].b_nob;
+	uint32_t      i;
+	uint32_t      j;
+	uint8_t	     *fail = NULL;
+	uint8_t	    **data_in = NULL;
+	uint8_t	    **data_out = NULL;
+	uint8_t	     *failed_ids = NULL;
+	uint8_t	     *alive_ids = NULL;
+	int	      ret = 0;
+
+	M0_PRE(math != NULL);
+	M0_PRE(data != NULL);
+	M0_PRE(parity != NULL);
+	M0_PRE(fails != NULL);
+
+	M0_ENTRY();
+
+	data_count = math->pmi_data_count;
+	parity_count = math->pmi_parity_count;
+
+	unit_count = data_count + parity_count;
+	fail = (uint8_t*) fails->b_addr;
+
+	M0_ALLOC_ARR(failed_ids, parity_count);
+	if (failed_ids == NULL) {
+		ret = M0_ERR_INFO(-ENOMEM, "failed to allocate memory for "
+				  "array of failed ids");
+		goto fini;
+	}
+
+	M0_ALLOC_ARR(alive_ids, unit_count);
+	if (alive_ids == NULL) {
+		ret = M0_ERR_INFO(-ENOMEM, "failed to allocate memory for "
+				  "array of alive ids");
+		goto fini;
+	}
+
+	m0_buf_init(&failed_idx_buf, failed_ids, 0);
+	m0_buf_init(&alive_idx_buf, alive_ids, 0);
+
+	for (i = 0; i < unit_count; i++) {
+		if (fail[i])
+			failed_ids[failed_idx_buf.b_nob++] = i;
+		else
+			alive_ids[alive_idx_buf.b_nob++] = i;
+	}
+	fail_count = failed_idx_buf.b_nob;
+
+	if ((fail_count <= 0) || (fail_count > parity_count)) {
+		ret = M0_ERR_INFO(-EINVAL, "Invalid fail count value. "
+				  "fail_count = %u. Expected value "
+				  "0 < fail_count <= %u", fail_count,
+				  parity_count);
+		goto fini;
+	}
+
+	for (i = 1; i < data_count; ++i) {
+		if (block_size != data[i].b_nob) {
+			ret = M0_ERR_INFO(-EINVAL, "data block size mismatch. "
+					  "block_size = %u, data[%u].b_nob=%u",
+					  block_size, i, (uint32_t)data[i].b_nob);
+			goto fini;
+		}
+	}
+
+	for (i = 0; i < parity_count; ++i) {
+		if (block_size != parity[i].b_nob) {
+			ret = M0_ERR_INFO(-EINVAL, "parity block size mismatch. "
+					  "block_size = %u, parity[%u].b_nob=%u",
+					  block_size, i, (uint32_t)parity[i].b_nob);
+			goto fini;
+		}
+	}
+
+	M0_ALLOC_ARR(data_in, data_count);
+	if (data_in == NULL) {
+		ret = M0_ERR_INFO(-ENOMEM, "failed to allocate memory for "
+				  "array of buffer pointers - data_in");
+		goto fini;
+	}
+
+	M0_ALLOC_ARR(data_out, fail_count);
+	if (data_out == NULL) {
+		ret = M0_ERR_INFO(-ENOMEM, "failed to allocate memory for "
+				  "array of buffer pointers - data_out");
+		goto fini;
+	}
+
+	for (i = 0, j = 0; i < fail_count; i++) {
+		if (failed_ids[i] < data_count)
+			data_out[j++] = (uint8_t *)data[failed_ids[i]].b_addr;
+		else
+			data_out[j++] =
+				(uint8_t *)parity[failed_ids[i] - data_count].b_addr;
+	}
+
+	for (i = 0, j = 0; i < data_count; i++) {
+		if (alive_ids[i] < data_count)
+			data_in[j++] = (uint8_t *)data[alive_ids[i]].b_addr;
+		else
+			data_in[j++] =
+				(uint8_t *)parity[alive_ids[i] - data_count].b_addr;
+	}
+
+	/* Get recovery coefficient tables */
+	ret = isal_gen_recov_coeff_tbl(data_count, parity_count, &failed_idx_buf,
+				       &alive_idx_buf, math->encode_matrix,
+				       math->g_tbls);
+	if (ret != 0) {
+		ret = M0_ERR_INFO(ret, "failed to generate recovery "
+				  "coefficient tables");
+		goto fini;
+	}
+
+	/* Recover data */
+	ec_encode_data(block_size, data_count, fail_count,
+		       math->g_tbls, data_in, data_out);
+
+fini:
+	m0_free(failed_ids);
+	m0_free(alive_ids);
+	m0_free(data_in);
+	m0_free(data_out);
+
+	/* TODO: Return error code instead of assert */
+	M0_ASSERT(ret == 0);
+
+	M0_LEAVE();
+}
+#endif
+
+#ifdef __KERNEL__
 static void reed_solomon_recover(struct m0_parity_math *math,
 				 struct m0_buf *data,
 				 struct m0_buf *parity,
@@ -857,6 +1124,7 @@ static void reed_solomon_recover(struct m0_parity_math *math,
 		}
 	}
 }
+#endif /* __KERNEL__ */
 
 M0_INTERNAL void m0_parity_math_recover(struct m0_parity_math *math,
 					struct m0_buf *data,
