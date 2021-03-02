@@ -807,6 +807,7 @@ static void dixreq_stable_ast(struct m0_sm_group *grp, struct m0_sm_ast *ast)
 	/* XXX: The callback is executed directly since the group
 	 * lock is the same. See the XXX comment in ::dixreq_completed_ast.
 	 */
+	M0_ASSERT(grp == oi->oi_sm_grp);
 	idx_op_ast_stable(oi->oi_sm_grp, &oi->oi_ar.ar_ast);
 	dix_req_destroy(req);
 	M0_LEAVE();

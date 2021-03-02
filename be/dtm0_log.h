@@ -242,7 +242,7 @@ M0_INTERNAL int m0_be_dtm0_log_prune(struct m0_be_dtm0_log    *log,
                                      struct m0_be_tx          *tx,
                                      const struct m0_dtm0_tid *id);
 
-/* Removes all records from the volatile log */
+/** Removes all records from the volatile log. */
 M0_INTERNAL void m0_be_dtm0_log_clear(struct m0_be_dtm0_log *log);
 
 M0_INTERNAL int m0_be_dtm0_log_insert_volatile(struct m0_be_dtm0_log *log,

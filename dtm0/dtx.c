@@ -208,7 +208,11 @@ static void m0_dtm0_dtx_assign_fop(struct m0_dtm0_dtx  *dtx,
 
 	(void) pa_idx;
 
-	/* See the comment at m0_dtm0_dtx::dd_op */
+	/* TODO: On the DTM side we should enforce the requirement
+	 * described at m0_dtm0_dtx::dd_op.
+	 * At this moment we silently ignore this as well as anything
+	 * related directly to REDO use-cases.
+	 */
 	if (dtx->dd_fop == NULL) {
 		dtx->dd_fop = pa_fop;
 	}
@@ -314,13 +318,18 @@ static void dtx_exec_all_ast_cb(struct m0_sm_group *grp, struct m0_sm_ast *ast)
 	M0_ASSERT(dtx->dd_sm.sm_state == M0_DDS_EXECUTED_ALL);
 	M0_ASSERT(dtx->dd_nr_executed == dtx->dd_txd.dtd_pg.dtpg_nr);
 
-	/* XXX: This loop emulates synchronous arrival of DTM0 notices.
+	/* TODO: This loop emulates synchronous arrival of DTM0 notices.
 	 * It should be removed once DTM0 service is able to send the notice.
 	 */
 	for (i = 0; i < dtx->dd_txd.dtd_pg.dtpg_nr; ++i) {
 		m0_dtm0_dtx_persistent(dtx, i);
 	}
 
+	/* TODO: As similar transition should be added into the function that
+	 * will handle PERSISTENT notices:
+	 *	if (dtx_state == exec_all && all(txr, PERSISTENT))
+	 *		state_set(STABLE)
+	 */
 	if (m0_dtm0_tx_desc_state_eq(&dtx->dd_txd, M0_DTPS_PERSISTENT)) {
 		m0_sm_state_set(&dtx->dd_sm, M0_DDS_STABLE);
 	}
@@ -355,14 +364,8 @@ static void m0_dtm0_dtx_executed(struct m0_dtm0_dtx *dtx, uint32_t idx)
 
 		dtx->dd_exec_all_ast.sa_cb = dtx_exec_all_ast_cb;
 		dtx->dd_exec_all_ast.sa_datum = dtx;
-		/* TODO: This is a poor-man's async call to ensure that
-		 * EXECUTED and STABLE are processed in "separate" ticks of
-		 * this machine. Such situation might happen only if DTM0
-		 * service notices are emulated (see the XXX comment inside
-		 * ::dtx_exec_all_ast_cb). In real life, DTM0 service will
-		 * always post such an update as an ast, therefore the
-		 * state transition from the callback (::dtx_exec_all_ast_cb)
-		 * can be moved right in here.
+		/* EXECUTED and STABLE should not be triggered within the
+		 * same ast tick. This ast helps us to enforce it.
 		 */
 		m0_sm_ast_post(dtx->dd_sm.sm_grp, &dtx->dd_exec_all_ast);
 	}

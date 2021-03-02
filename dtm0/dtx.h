@@ -85,13 +85,17 @@ M0_INTERNAL struct m0_dtx* m0_dtx0_alloc(struct m0_dtm0_service *svc,
 					 struct m0_sm_group     *group);
 M0_INTERNAL void m0_dtx0_free(struct m0_dtx *dtx);
 
-/* Assigns TID to the transaction. */
+/** Assignsa a TID to the transaction. */
 M0_INTERNAL int m0_dtx0_prepare(struct m0_dtx *dtx);
 
 M0_INTERNAL int m0_dtx0_open(struct m0_dtx  *dtx, uint32_t nr);
+
+/** Fills in the FID of the given participant. */
 M0_INTERNAL int m0_dtx0_assign_fid(struct m0_dtx       *dtx,
 				   uint32_t             pa_idx,
 				   const struct m0_fid *pa_fid);
+
+/** Fills in the FOP associated with the given participant. */
 M0_INTERNAL void m0_dtx0_assign_fop(struct m0_dtx       *dtx,
 				    uint32_t             pa_idx,
 				    const struct m0_fop *pa_fop);
@@ -99,8 +103,8 @@ M0_INTERNAL int m0_dtx0_close(struct m0_dtx *dtx);
 
 M0_INTERNAL void m0_dtx0_executed(struct m0_dtx *dtx, uint32_t pa_idx);
 
-/* Puts a copy of dtx's transaction descriptor into "dst".
- * User is responsible for m0_dtm0_tx_desc_fini()lasing 'dst'.
+/** Puts a copy of dtx's transaction descriptor into "dst".
+ * User is responsible for m0_dtm0_tx_desc_fini()lasing of 'dst'.
  * If dtx is NULL then dst will be filled with the empty tx_desc.
  */
 M0_INTERNAL int m0_dtx0_copy_txd(const struct m0_dtx    *dtx,

@@ -300,6 +300,8 @@ M0_INTERNAL void m0_be_dtm0_log_clear(struct m0_be_dtm0_log *log)
 {
 	struct m0_dtm0_log_rec *rec;
 
+	/* TODO: Ensure the log is volatile */
+
 	m0_tl_teardown(lrec, log->dl_tlist, rec) {
 		M0_ASSERT(m0_dtm0_log_rec__invariant(rec));
 		m0_be_dtm0_log_rec_fini(&rec, NULL);
@@ -312,7 +314,7 @@ M0_INTERNAL int m0_be_dtm0_log_insert_volatile(struct m0_be_dtm0_log *log,
 {
 	int rc;
 
-	/* TODO: dissolve dlr_dtx and remove this code */
+	/* TODO: dissolve dlr_txd and remove this code */
 	rc = m0_dtm0_tx_desc_copy(&rec->dlr_dtx.dd_txd, &rec->dlr_txd);
 	if (rc != 0)
 		return rc;
@@ -324,7 +326,7 @@ M0_INTERNAL int m0_be_dtm0_log_insert_volatile(struct m0_be_dtm0_log *log,
 M0_INTERNAL void m0_be_dtm0_log_update_volatile(struct m0_be_dtm0_log *log,
 						struct m0_dtm0_log_rec *rec)
 {
-	/* TODO: dissolve dlr_dtx and remove this code */
+	/* TODO: dissolve dlr_txd and remove this code */
 	m0_dtm0_tx_desc_apply(&rec->dlr_txd, &rec->dlr_dtx.dd_txd);
 }
 

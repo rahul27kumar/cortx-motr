@@ -119,7 +119,7 @@ M0_INTERNAL int m0_dtm0_tid_cmp(struct m0_dtm0_clk_src   *cs,
 M0_INTERNAL void m0_dtm0_tx_desc_apply(struct m0_dtm0_tx_desc *tgt,
 				       const struct m0_dtm0_tx_desc *upd)
 {
-	int i;
+	int                   i;
 	struct m0_dtm0_tx_pa *tgt_pa;
 	struct m0_dtm0_tx_pa *upd_pa;
 
@@ -134,8 +134,6 @@ M0_INTERNAL void m0_dtm0_tx_desc_apply(struct m0_dtm0_tx_desc *tgt,
 	for (i = 0; i < upd->dtd_pg.dtpg_nr; ++i) {
 		tgt_pa = &tgt->dtd_pg.dtpg_pa[i];
 		upd_pa = &upd->dtd_pg.dtpg_pa[i];
-
-		M0_ASSERT(m0_fid_cmp(&tgt_pa->pa_fid, &upd_pa->pa_fid) == 0);
 
 		tgt_pa->pa_state = max_check(tgt_pa->pa_state,
 					     upd_pa->pa_state);
